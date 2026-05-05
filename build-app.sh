@@ -35,6 +35,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key>       <string>14.0</string>
     <key>LSUIElement</key>                  <true/>
     <key>NSHighResolutionCapable</key>      <true/>
+    <key>NSAppleEventsUsageDescription</key> <string>Pastie reads the frontmost Ghostty window name to choose the upload target.</string>
 </dict>
 </plist>
 PLIST
