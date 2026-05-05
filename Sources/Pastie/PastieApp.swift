@@ -44,6 +44,10 @@ struct MenuContentView: View {
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
+        routingView
+
+        Divider()
+
         Button("Upload Clipboard Image") { upload() }
             .keyboardShortcut("u")
 
@@ -66,6 +70,21 @@ struct MenuContentView: View {
     }
 
     @ViewBuilder
+    private var routingView: some View {
+        let win = state.currentWindowName()
+        let host = state.resolvedHost()
+        let fallback = state.mappings.map(\.sshHost).filter { !$0.isEmpty }
+        if let host {
+            Text("\(win ?? "?") → \(host)")
+        } else if !fallback.isEmpty {
+            let label = win ?? "no window"
+            Text("\(label) → fallback (\(fallback.count) hosts)")
+        } else {
+            Text("No hosts configured").foregroundStyle(.orange)
+        }
+    }
+
+    @ViewBuilder
     private var statusView: some View {
         switch state.status {
         case .idle:
@@ -85,15 +104,52 @@ struct MenuContentView: View {
 @MainActor
 func triggerUpload(state: AppState) {
     if case .uploading = state.status { return }
-    let uploader = Uploader(host: state.sshHost, remoteDirectory: state.remoteDirectory)
+
+    let resolved = state.resolvedHost()
+    let allHosts = state.mappings.map(\.sshHost).filter { !$0.isEmpty }
+    let targetHosts: [String] = resolved.map { [$0] } ?? allHosts
+    let isFallback = resolved == nil
+
+    guard !targetHosts.isEmpty else {
+        let msg = "No hosts configured. Open Settings."
+        state.status = .failure(msg)
+        notify(title: "Pastie", body: msg)
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            if case .failure = state.status { state.status = .idle }
+        }
+        return
+    }
+
+    let uploader = Uploader(hosts: targetHosts, remoteDirectory: state.remoteDirectory)
     state.status = .uploading
     Task {
         do {
-            let path = try await uploader.upload()
-            state.status = .success(path)
-            state.lastUploadedPath = path
-            copyToClipboard(path)
-            notify(title: "Uploaded", body: path)
+            let result = try await uploader.upload()
+            state.lastUploadedPath = result.path
+            copyToClipboard(result.path)
+
+            let total = result.succeeded.count + result.failed.count
+            let succeededList = result.succeeded.joined(separator: ", ")
+            let prefix: String
+            if total == 1 {
+                prefix = succeededList
+            } else if result.failed.isEmpty {
+                prefix = "\(result.succeeded.count) hosts"
+            } else {
+                prefix = "\(result.succeeded.count)/\(total) hosts"
+            }
+            state.status = .success("\(prefix) → \(result.path)")
+
+            let title: String = {
+                if !result.failed.isEmpty { return "Uploaded (partial)" }
+                return isFallback ? "Uploaded (fallback)" : "Uploaded"
+            }()
+            var body = "\(succeededList): \(result.path)"
+            if !result.failed.isEmpty {
+                body += " · failed: \(result.failed.map(\.host).joined(separator: ", "))"
+            }
+            notify(title: title, body: body)
         } catch {
             state.status = .failure(error.localizedDescription)
             notify(title: "Upload failed", body: error.localizedDescription)
@@ -109,14 +165,35 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            TextField("SSH Host", text: $state.sshHost, prompt: Text("e.g. coder"))
-            TextField("Remote Directory", text: $state.remoteDirectory, prompt: Text("e.g. ~/uploads"))
-            Text("SSH Host can be any alias from ~/.ssh/config, or user@hostname.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Section("Host Mappings") {
+                ForEach($state.mappings) { $mapping in
+                    HStack {
+                        TextField("Window name", text: $mapping.windowName)
+                        Text("→").foregroundStyle(.secondary)
+                        TextField("SSH host", text: $mapping.sshHost)
+                        Button {
+                            state.mappings.removeAll { $0.id == mapping.id }
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+                Button("Add Mapping") {
+                    state.mappings.append(HostMapping(windowName: "", sshHost: ""))
+                }
+            }
+            Section("Remote Directory") {
+                TextField("Path", text: $state.remoteDirectory, prompt: Text("e.g. ~/uploads"))
+            }
+            Section {
+                Text("Pastie reads the frontmost Ghostty window name and uploads to the matching SSH host. If no mapping matches, it falls back to uploading to every configured host. Window name match is exact.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding()
-        .frame(width: 420)
+        .frame(width: 500)
     }
 }
 
